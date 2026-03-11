@@ -9,8 +9,17 @@
  *   bun connectors/slack.ts
  * 
  * Environment variables:
- *   SLACK_BOT_TOKEN - Bot User OAuth Token (starts with xoxb-)
- *   SLACK_APP_TOKEN - App-Level Token for Socket Mode (starts with xapp-)
+ *   SLACK_BOT_TOKEN        - Bot User OAuth Token (starts with xoxb-)
+ *   SLACK_APP_TOKEN        - App-Level Token for Socket Mode (starts with xapp-)
+ *   SLACK_TRIGGER          - Trigger prefix (default: !oc)
+ *   SESSION_RETENTION_DAYS - Days to retain idle sessions (default: 7)
+ *
+ * Thread Isolation Strategy:
+ *   Sessions are keyed on `channel_threadTs` rather than `channel` alone.
+ *   For replies inside a thread: threadTs = event.thread_ts (the parent message ts).
+ *   For top-level messages:      threadTs = message.ts (the message itself becomes the thread root).
+ *   This ensures each Slack thread gets its own isolated opencode session.
+ *   /clear only clears the current thread's context, not the whole channel.
  */
 
 import fs from "fs"
@@ -31,7 +40,7 @@ import {
 
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN
 const APP_TOKEN = process.env.SLACK_APP_TOKEN
-const TRIGGER = process.env.SLACK_TRIGGER || "!oc"
+const TRIGGER = process.env.SLACK_TRIGGER || process.env.TRIGGER || "!oc"
 const SESSION_RETENTION_DAYS = parseInt(process.env.SESSION_RETENTION_DAYS || "7", 10)
 const RATE_LIMIT_SECONDS = 5
 
@@ -95,7 +104,11 @@ class SlackConnector extends BaseConnector<ChannelSession> {
 
       if (!channel) return
 
-      this.log(`[MENTION] ${userId} in ${channel}: ${text}`)
+      // Determine thread context: reply in existing thread or start new one
+      const threadTs = event.thread_ts || event.ts
+      const sessionKey = this.threadSessionKey(channel, event.thread_ts, event.ts)
+
+      this.log(`[MENTION] ${userId} in ${sessionKey}: ${text}`)
 
       // Extract query (remove the mention)
       const query = text.replace(/<@[A-Z0-9]+>/g, "").trim()
@@ -104,7 +117,7 @@ class SlackConnector extends BaseConnector<ChannelSession> {
       // Rate limiting
       if (!this.checkRateLimit(userId)) return
 
-      await this.processQuery(channel, userId, query, say)
+      await this.processQuery(sessionKey, threadTs, userId, query, say)
     })
 
     // Handle messages with trigger prefix
@@ -118,7 +131,12 @@ class SlackConnector extends BaseConnector<ChannelSession> {
       const channel = message.channel
       const text = message.text
 
-      this.log(`[MSG] ${userId} in ${channel}: ${text}`)
+      // Determine thread context
+      const msgAny = message as any
+      const threadTs = msgAny.thread_ts || msgAny.ts
+      const sessionKey = this.threadSessionKey(channel, msgAny.thread_ts, msgAny.ts)
+
+      this.log(`[MSG] ${userId} in ${sessionKey}: ${text}`)
 
       // Extract query after trigger
       const match = text.match(new RegExp(`^${TRIGGER}\\s+(.+)`, "i"))
@@ -127,14 +145,14 @@ class SlackConnector extends BaseConnector<ChannelSession> {
 
       // Handle commands
       if (query.startsWith("/")) {
-        await this.handleCommand(channel, query, async (text) => { await say(text) })
+        await this.handleCommand(sessionKey, query, async (text) => { await say(text) })
         return
       }
 
       // Rate limiting
       if (!this.checkRateLimit(userId)) return
 
-      await this.processQuery(channel, userId, query, say)
+      await this.processQuery(sessionKey, threadTs, userId, query, say)
     })
 
     // Start the app
@@ -163,16 +181,26 @@ class SlackConnector extends BaseConnector<ChannelSession> {
   // Slack-specific methods
   // ---------------------------------------------------------------------------
 
+  /**
+   * Build a per-thread session key.
+   * - If the message is a reply in a thread: threadTs is the parent message ts.
+   * - If the message is a top-level message: use its own ts as the thread root.
+   */
+  private threadSessionKey(channel: string, threadTs: string | undefined, fallbackTs: string): string {
+    return `${channel}_${threadTs ?? fallbackTs}`
+  }
+
   private async processQuery(
-    channel: string,
+    sessionKey: string,
+    threadTs: string,
     user: string,
     query: string,
     say: (text: string) => Promise<unknown>
   ): Promise<void> {
     const startTime = Date.now()
 
-    // Get or create session
-    const session = await this.getOrCreateSession(channel, (client) =>
+    // Get or create session (keyed per thread)
+    const session = await this.getOrCreateSession(sessionKey, (client) =>
       this.createSession(client)
     )
 
@@ -230,7 +258,7 @@ class SlackConnector extends BaseConnector<ChannelSession> {
       for (const imagePath of toolPaths) {
         if (fs.existsSync(imagePath)) {
           this.log(`Uploading image from tool result: ${imagePath}`)
-          await this.uploadImage(channel, imagePath)
+          await this.uploadImage(sessionKey, imagePath, threadTs)
         }
       }
 
@@ -241,7 +269,7 @@ class SlackConnector extends BaseConnector<ChannelSession> {
         if (toolPaths.includes(imagePath)) continue
         if (fs.existsSync(imagePath)) {
           this.log(`Uploading image from response: ${imagePath}`)
-          await this.uploadImage(channel, imagePath)
+          await this.uploadImage(sessionKey, imagePath, threadTs)
         }
       }
 
@@ -255,10 +283,10 @@ class SlackConnector extends BaseConnector<ChannelSession> {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
       const outChars = cleanResponse ? cleanResponse.length : 0
       const tools = toolCallCount > 0 ? `, ${toolCallCount} tool${toolCallCount > 1 ? "s" : ""}` : ""
-      this.log(`[DONE] ${elapsed}s (${outChars} chars${tools})`)
+      this.log(`[DONE] ${elapsed}s (${outChars} chars${tools}) [${sessionKey}]`)
     } catch (err) {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
-      this.logError(`[FAIL] ${elapsed}s:`, err)
+      this.logError(`[FAIL] ${elapsed}s [${sessionKey}]:`, err)
       await say("Sorry, something went wrong processing your request.")
     } finally {
       client.off("activity", activityHandler)
@@ -273,7 +301,7 @@ class SlackConnector extends BaseConnector<ChannelSession> {
     }
   }
 
-  private async uploadImage(channel: string, filePath: string): Promise<void> {
+  private async uploadImage(channel: string, filePath: string, threadTs?: string): Promise<void> {
     try {
       if (!fs.existsSync(filePath)) {
         this.logError(`Image file not found: ${filePath}`)
@@ -288,6 +316,7 @@ class SlackConnector extends BaseConnector<ChannelSession> {
         file: fileBuffer,
         filename: fileName,
         title: fileName,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
       })
 
       this.log(`Uploaded image to ${channel}: ${fileName}`)

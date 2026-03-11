@@ -266,3 +266,30 @@ Reference:
 ## License
 
 [MIT](LICENSE)
+
+---
+
+## Fork Notes (iheartradio/ds-research)
+
+This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
+
+**How it differs from upstream:** upstream creates one opencode session per Slack channel; this fork creates a separate isolated session per Slack thread. `/clear` only clears the current thread's context, not the whole channel.
+
+**Only modified file:** `connectors/slack.ts` — all other files are identical to upstream.
+
+**Key changes in `connectors/slack.ts`:**
+- Session key is now `channel_threadTs` instead of `channel`
+- Top-level messages use their own `ts` as the thread root key
+- `uploadImage` accepts an optional `threadTs?` so images land in the correct thread
+- `handleCommand` (e.g. `/clear`) receives the scoped `sessionKey`, not raw `channel`
+- `TRIGGER` env var falls back to `SLACK_TRIGGER` for clarity (both work)
+
+### Staying in sync with upstream
+
+```bash
+git remote add upstream https://github.com/ominiverdi/opencode-chat-bridge.git
+git fetch upstream
+git rebase upstream/main
+# resolve any conflicts in connectors/slack.ts (the only modified file)
+git push --force-with-lease origin main
+```
