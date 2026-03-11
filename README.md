@@ -269,7 +269,7 @@ Reference:
 
 ---
 
-## Fork Notes (iheartradio/ds-research)
+## Fork Notes
 
 This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 
