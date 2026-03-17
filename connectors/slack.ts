@@ -33,6 +33,7 @@ import {
   removeImageMarkers,
   sanitizeServerPaths,
 } from "../src"
+import { getSessionDir } from "../src/session-utils"
 
 // =============================================================================
 // Configuration
@@ -65,6 +66,14 @@ function resolveSessionRetentionMins(env: NodeJS.ProcessEnv): number {
   }
 
   return 30
+}
+
+export function isSessionStale(
+  basisTime: Date,
+  retentionMins: number,
+  nowMs: number = Date.now()
+): boolean {
+  return (nowMs - basisTime.getTime()) / 60000 >= retentionMins
 }
 
 export function shouldHandleThreadMessage(input: {
@@ -390,6 +399,32 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     return (Date.now() - basis.getTime()) / 60000
   }
 
+  private sessionContextIdToDir(id: string): string {
+    return getSessionDir(this.config.connector, id)
+  }
+
+  private deleteSessionCacheDir(id: string): void {
+    const dir = this.sessionContextIdToDir(id)
+    try {
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true })
+      }
+    } catch (err) {
+      this.logError(`[SESSION_EXPIRE] Failed cache cleanup for ${id}:`, err)
+    }
+  }
+
+  private async evictSession(id: string): Promise<void> {
+    const session = this.sessionManager.get(id)
+    if (session) {
+      try {
+        await session.client.disconnect()
+      } catch {}
+    }
+    this.sessionManager.delete(id)
+    this.deleteSessionCacheDir(id)
+  }
+
   private async expireStaleSessions(): Promise<void> {
     const stale: string[] = []
     for (const [id, session] of this.sessionManager.sessions) {
@@ -399,14 +434,24 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     }
 
     for (const id of stale) {
-      const session = this.sessionManager.get(id)
-      if (!session) continue
-      try {
-        await session.client.disconnect()
-      } catch {}
-      this.sessionManager.delete(id)
+      await this.evictSession(id)
       this.log(`[SESSION_EXPIRE] ${id} aged out. Exiting the session, Ciao!`)
     }
+  }
+
+  private async notifyAndExpireCurrentThreadIfStale(
+    context: SlackEventContext,
+    slackClient: any
+  ): Promise<void> {
+    const session = this.sessionManager.get(context.contextId)
+    if (!session) return
+
+    const basis = SESSION_RETENTION_MODE === "created_at" ? session.createdAt : session.lastActivity
+    if (!isSessionStale(basis, SESSION_RETENTION_MINS)) return
+
+    await this.evictSession(context.contextId)
+    await this.sendThreadReply(slackClient, context.channelId, context.replyThreadTs, "Exiting the session, Ciao!")
+    this.log(`[SESSION_EXPIRE] ${context.contextId} aged out and notified in thread`)
   }
 
   private async getOrCreateThreadSession(context: SlackEventContext): Promise<ChannelSession | null> {
@@ -424,6 +469,8 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
 
   private async processQuery(context: SlackEventContext, query: string, slackClient: any): Promise<void> {
     const startTime = Date.now()
+
+    await this.notifyAndExpireCurrentThreadIfStale(context, slackClient)
 
     // Get or create session (keyed per thread)
     const session = await this.getOrCreateThreadSession(context)

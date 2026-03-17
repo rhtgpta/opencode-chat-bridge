@@ -4,6 +4,7 @@ import {
   resolveThreadTs,
   normalizeSlackEventContext,
   buildThreadReplyPayload,
+  isSessionStale,
   shouldHandleThreadMessage,
 } from "../../connectors/slack"
 
@@ -94,5 +95,14 @@ describe("slack thread context keying", () => {
       threadTs: "1710000000.123",
       trigger: "!sql",
     })).toBe(false)
+  })
+
+  test("session stale helper uses retention minutes threshold", () => {
+    const now = Date.now()
+    const twentyMinsAgo = new Date(now - 20 * 60 * 1000)
+    const fortyMinsAgo = new Date(now - 40 * 60 * 1000)
+
+    expect(isSessionStale(twentyMinsAgo, 30, now)).toBe(false)
+    expect(isSessionStale(fortyMinsAgo, 30, now)).toBe(true)
   })
 })
