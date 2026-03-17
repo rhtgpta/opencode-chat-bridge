@@ -6,6 +6,7 @@ import {
   normalizeSlackEventContext,
   buildThreadReplyPayload,
   parseBooleanEnv,
+  shouldHandleThreadMessage,
 } from "../../connectors/slack"
 
 describe("slack thread context keying", () => {
@@ -78,5 +79,34 @@ describe("slack thread context keying", () => {
     expect(parseBooleanEnv("false", true)).toBe(false)
     expect(parseBooleanEnv("true", false)).toBe(true)
     expect(parseBooleanEnv("invalid", false)).toBe(false)
+  })
+
+  test("thread messages without trigger/mention are handled", () => {
+    expect(shouldHandleThreadMessage({
+      text: "continue this",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+    })).toBe(true)
+  })
+
+  test("non-thread messages are ignored by implicit thread handler", () => {
+    expect(shouldHandleThreadMessage({
+      text: "continue this",
+      trigger: "!sql",
+    })).toBe(false)
+  })
+
+  test("trigger and mention messages are excluded from implicit thread handler", () => {
+    expect(shouldHandleThreadMessage({
+      text: "!sql query",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+    })).toBe(false)
+
+    expect(shouldHandleThreadMessage({
+      text: "<@U123> hi",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+    })).toBe(false)
   })
 })

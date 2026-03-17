@@ -288,6 +288,11 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
   - `false`: fallback to legacy channel-level context
 - `THREAD_MIGRATE_FROM_CHANNEL` (default: `false`)
   - when enabled, if a thread-keyed session is missing and a legacy channel-keyed session exists, initialize/copy from legacy context on first access
+- `SESSION_RETENTION_MINS` (default: `30`)
+  - expires idle thread sessions in minutes
+- `SESSION_RETENTION_MODE` (default: `last_activity`)
+  - `last_activity`: expiry is based on most recent user interaction (recommended)
+  - `created_at`: expiry is based on session creation timestamp
 
 **Key changes in this fork:**
 - Thread-scoped session keying now uses `team:channel:thread_root_ts`
@@ -295,6 +300,8 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 - Replies are forced through `chat.postMessage` with mandatory `thread_ts`
 - Optional migration from channel-level caches is feature-flagged
 - Duplicate event handling uses `${channel}:${ts}` idempotency keys
+- In-thread follow-ups no longer require repeated `@bot` mentions or trigger prefix
+- Expired sessions are closed with exit log: `Exiting the session, Ciao!`
 
 **Tests added:**
 - Unit: `tests/unit/slack-thread-context.test.ts`
@@ -318,6 +325,13 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 5. Restart verification
    - Restart connector
    - Verify each thread context still maps independently
+6. Implicit in-thread follow-up
+   - In an existing thread, send a plain message without `@bot` or trigger
+   - Verify bot still responds in the same thread
+7. Retention timeout behavior
+   - Set `SESSION_RETENTION_MINS=1` temporarily, restart service
+   - Wait >1 minute without activity in a thread, then message in that thread
+   - Verify a fresh context/session is used and logs include session expiry marker
 
 ### Edge cases & troubleshooting
 
@@ -325,6 +339,7 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 - If `thread_ts` is absent, connector uses `event.ts` as thread root.
 - DMs and MPIMs use same thread isolation logic (channel ID remains part of context ID).
 - If migration is enabled but no legacy session exists, connector creates a fresh thread session.
+- Session expiry runs on event handling; no background cron is required.
 - Never hardcode secrets; use environment variables or systemd environment settings.
 
 ### Staying in sync with upstream

@@ -12,7 +12,7 @@
  *   SLACK_BOT_TOKEN        - Bot User OAuth Token (starts with xoxb-)
  *   SLACK_APP_TOKEN        - App-Level Token for Socket Mode (starts with xapp-)
  *   SLACK_TRIGGER          - Trigger prefix (default: !oc)
- *   SESSION_RETENTION_DAYS - Days to retain idle sessions (default: 7)
+ *   SESSION_RETENTION_MINS - Minutes to retain idle sessions (default: 30)
  *
  * Thread Isolation Strategy:
  *   Sessions are keyed on `channel_threadTs` rather than `channel` alone.
@@ -42,7 +42,8 @@ import { getSessionDir, ensureSessionDir } from "../src/session-utils"
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN
 const APP_TOKEN = process.env.SLACK_APP_TOKEN
 const TRIGGER = process.env.SLACK_TRIGGER || process.env.TRIGGER || "!oc"
-const SESSION_RETENTION_DAYS = parseInt(process.env.SESSION_RETENTION_DAYS || "7", 10)
+const SESSION_RETENTION_MINS = resolveSessionRetentionMins(process.env)
+const SESSION_RETENTION_MODE = (process.env.SESSION_RETENTION_MODE || "last_activity").toLowerCase()
 const RATE_LIMIT_SECONDS = 5
 const THREAD_ISOLATION = parseBooleanEnv(process.env.THREAD_ISOLATION, true)
 const THREAD_MIGRATE_FROM_CHANNEL = parseBooleanEnv(process.env.THREAD_MIGRATE_FROM_CHANNEL, false)
@@ -60,12 +61,45 @@ export interface SlackEventContext {
   dedupeId: string
 }
 
+function resolveSessionRetentionMins(env: NodeJS.ProcessEnv): number {
+  const minsRaw = env.SESSION_RETENTION_MINS
+  if (minsRaw) {
+    const mins = parseInt(minsRaw, 10)
+    if (Number.isFinite(mins) && mins > 0) return mins
+  }
+
+  const legacyDaysRaw = env.SESSION_RETENTION_DAYS
+  if (legacyDaysRaw) {
+    const days = parseFloat(legacyDaysRaw)
+    if (Number.isFinite(days) && days > 0) return Math.max(1, Math.floor(days * 24 * 60))
+  }
+
+  return 30
+}
+
 export function parseBooleanEnv(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback
   const normalized = value.trim().toLowerCase()
   if (["1", "true", "yes", "on"].includes(normalized)) return true
   if (["0", "false", "no", "off"].includes(normalized)) return false
   return fallback
+}
+
+export function shouldHandleThreadMessage(input: {
+  text: string
+  threadTs?: string
+  trigger: string
+  subtype?: string
+  botId?: string
+}): boolean {
+  const text = input.text.trim()
+  if (!text) return false
+  if (!input.threadTs) return false
+  if (input.subtype) return false
+  if (input.botId) return false
+  if (text.toLowerCase().startsWith(`${input.trigger.toLowerCase()} `)) return false
+  if (/^<@[A-Z0-9]+>/.test(text)) return false
+  return true
 }
 
 export function resolveThreadTs(threadTs: string | undefined, eventTs: string): string {
@@ -168,7 +202,7 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
       trigger: TRIGGER,
       botName: "OpenCode Slack Bot",
       rateLimitSeconds: RATE_LIMIT_SECONDS,
-      sessionRetentionDays: SESSION_RETENTION_DAYS,
+      sessionRetentionDays: SESSION_RETENTION_MINS / (24 * 60),
     })
   }
 
@@ -190,6 +224,7 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     }
 
     this.logStartup()
+    this.log(`Session retention: ${SESSION_RETENTION_MINS} minutes (${SESSION_RETENTION_MODE})`)
     await this.cleanupSessions()
 
     // Create Slack app with Socket Mode
@@ -201,6 +236,8 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
 
     // Handle app mentions (@bot)
     this.app.event("app_mention", async ({ event, body, client }) => {
+      await this.expireStaleSessions()
+
       let context: SlackEventContext
       try {
         context = normalizeSlackEventContext({
@@ -235,6 +272,8 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
 
     // Handle messages with trigger prefix
     this.app.message(new RegExp(`^${TRIGGER}\\s+(.+)`, "i"), async ({ message, body, client }) => {
+      await this.expireStaleSessions()
+
       // Type guard for message with text and user
       if (!("text" in message) || !message.text) return
       if (!("user" in message) || !message.user) return
@@ -282,6 +321,50 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
       await this.processQuery(context, query, client)
     })
 
+    this.app.message(async ({ message, body, client }) => {
+      await this.expireStaleSessions()
+
+      if (!("text" in message) || !message.text) return
+      if (!("user" in message) || !message.user) return
+      if (!("channel" in message) || !message.channel) return
+
+      const msgAny = message as any
+      if (!shouldHandleThreadMessage({
+        text: message.text,
+        threadTs: msgAny.thread_ts,
+        trigger: TRIGGER,
+        subtype: msgAny.subtype,
+        botId: msgAny.bot_id,
+      })) {
+        return
+      }
+
+      let context: SlackEventContext
+      try {
+        context = normalizeSlackEventContext({
+          teamId: (body as any).team_id,
+          channelId: message.channel,
+          userId: message.user,
+          text: message.text,
+          eventTs: msgAny.ts,
+          threadTs: msgAny.thread_ts,
+        })
+      } catch (err) {
+        this.logError("[THREAD] Invalid event payload:", err)
+        return
+      }
+
+      if (this.isDuplicateEvent(context.dedupeId)) {
+        this.log(`[DUPLICATE] Skipping ${context.dedupeId}`)
+        return
+      }
+
+      this.log(`[THREAD] ${context.userId} in ${context.contextId}: ${context.text}`)
+
+      if (!this.checkRateLimit(context.userId)) return
+      await this.processQuery(context, context.text.trim(), client)
+    })
+
     // Start the app
     await this.app.start()
     this.log("Started! Listening for messages...")
@@ -295,6 +378,7 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
       await this.app.stop()
     }
 
+    console.log("Exiting the session, Ciao!")
     this.log("Stopped.")
   }
 
@@ -324,6 +408,30 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
 
     this.processedEvents.set(dedupeId, now)
     return false
+  }
+
+  private sessionAgeMinutes(session: ChannelSession): number {
+    const basis = SESSION_RETENTION_MODE === "created_at" ? session.createdAt : session.lastActivity
+    return (Date.now() - basis.getTime()) / 60000
+  }
+
+  private async expireStaleSessions(): Promise<void> {
+    const stale: string[] = []
+    for (const [id, session] of this.sessionManager.sessions) {
+      if (this.sessionAgeMinutes(session) >= SESSION_RETENTION_MINS) {
+        stale.push(id)
+      }
+    }
+
+    for (const id of stale) {
+      const session = this.sessionManager.get(id)
+      if (!session) continue
+      try {
+        await session.client.disconnect()
+      } catch {}
+      this.sessionManager.delete(id)
+      this.log(`[SESSION_EXPIRE] ${id} aged out. Exiting the session, Ciao!`)
+    }
   }
 
   private async getOrCreateSessionWithMigration(context: SlackEventContext): Promise<ChannelSession | null> {
