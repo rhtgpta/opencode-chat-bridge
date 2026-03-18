@@ -326,18 +326,24 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     })
 
     this.app.message(async ({ message, body, client }) => {
+      // DEBUG
+      const _m = message as any
+      this.log(`[RAW] type=${_m.type} subtype=${_m.subtype} bot_id=${_m.bot_id} channel=${_m.channel} thread_ts=${_m.thread_ts} ts=${_m.ts} user=${_m.user} text=${JSON.stringify((_m.text||"").slice(0,60))}`)
+
       if (!("text" in message) || !message.text) return
       if (!("user" in message) || !message.user) return
       if (!("channel" in message) || !message.channel) return
 
       const msgAny = message as any
-      if (!shouldHandleThreadMessage({
+      const _should = shouldHandleThreadMessage({
         text: message.text,
         threadTs: msgAny.thread_ts,
         trigger: TRIGGER,
         subtype: msgAny.subtype,
         botId: msgAny.bot_id,
-      })) {
+      })
+      this.log(`[RAW] shouldHandle=${_should} sessions=${JSON.stringify([...this.sessionManager.sessions.keys()])}`)
+      if (!_should) {
         return
       }
 
