@@ -275,14 +275,62 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 
 **How it differs from upstream:** upstream creates one opencode session per Slack channel; this fork creates a separate isolated session per Slack thread. `/clear` only clears the current thread's context, not the whole channel.
 
-**Only modified file:** `connectors/slack.ts` — all other files are identical to upstream.
+**Thread context ID:** `context_id = ${channel_id}:${thread_ts_or_ts}` where `thread_ts_or_ts = event.thread_ts ?? event.ts`.
 
-**Key changes in `connectors/slack.ts`:**
-- Session key is now `channel_threadTs` instead of `channel`
-- Top-level messages use their own `ts` as the thread root key
-- `uploadImage` accepts an optional `threadTs?` so images land in the correct thread
-- `handleCommand` (e.g. `/clear`) receives the scoped `sessionKey`, not raw `channel`
-- `TRIGGER` env var falls back to `SLACK_TRIGGER` for clarity (both work)
+**Thread reply behavior:** all Slack replies are posted with `thread_ts`.
+- top-level `app_mention` (no `thread_ts`) -> bot replies in new thread with `thread_ts=event.ts`
+- existing thread mention/message -> bot replies in same thread with `thread_ts=event.thread_ts`
+- no bare channel timeline replies are used
+
+**Config flags (Slack):**
+- `SESSION_RETENTION_MINS` (default: `30`)
+  - expires thread sessions after this many minutes of user inactivity
+
+**Key changes in this fork:**
+- Thread-scoped session keying now uses `channel:thread_root_ts`
+- Event normalization captures `team_id`, `channel`, `ts`, `thread_ts`, `user`, `text` into one internal context
+- Replies are forced through `chat.postMessage` with mandatory `thread_ts`
+- Duplicate event handling uses `${channel}:${ts}` idempotency keys
+- Expired sessions auto-close on timer and delete in-memory + on-disk cache
+
+**Tests added:**
+- Unit: `tests/unit/slack-thread-context.test.ts`
+- Integration: `tests/integration/slack-event-mapping.test.ts`
+
+### Manual Slack test checklist
+
+1. Top-level mention starts thread
+   - Send `@bot hello` in a channel (not in thread)
+   - Verify bot reply appears inside a new thread under that message
+2. Existing thread mention stays in same thread
+   - Continue with replies/comments in that thread
+   - Verify bot response stays in same thread (same thread root)
+3. Thread isolation in same channel
+   - Create two separate threads in same channel
+   - Send different instructions in each
+   - Verify responses/context do not leak across threads
+4. Cache independence
+   - Run `/clear` in one thread
+   - Verify only that thread is reset; other thread remains intact
+5. Restart verification
+   - Restart connector
+   - Verify thread-scoped sessions start fresh after restart
+   - Verify a new mention/trigger recreates the thread session for later implicit follow-ups
+6. Retention timeout behavior
+   - Set `SESSION_RETENTION_MINS=1` temporarily, restart service
+   - Start a thread and wait >1 minute without activity
+   - Verify cache for that thread is removed and logs include session expiry marker
+   - Verify the next message in that thread starts a fresh context/session
+
+### Edge cases & troubleshooting
+
+- Missing `channel` or `ts` fails fast with explicit log message.
+- Missing `team_id` is tolerated; the connector falls back to channel-based session normalization.
+- If `thread_ts` is absent, connector uses `event.ts` as thread root.
+- DMs and MPIMs use same thread isolation logic (channel ID remains part of context ID).
+- Session expiry runs on a background sweep and is based on `lastActivity` (user inactivity).
+- Startup cleanup of old on-disk session dirs is still based on directory age, not reconstructed Slack inactivity.
+- Never hardcode secrets; use environment variables or systemd environment settings.
 
 ### Staying in sync with upstream
 
@@ -290,6 +338,6 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 git remote add upstream https://github.com/ominiverdi/opencode-chat-bridge.git
 git fetch upstream
 git rebase upstream/main
-# resolve any conflicts in connectors/slack.ts (the only modified file)
+# resolve any conflicts in connectors/slack.ts, README.md, .env.example, and Slack tests
 git push --force-with-lease origin main
 ```
