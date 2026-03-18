@@ -5,6 +5,7 @@
  * that all connectors inherit from.
  */
 
+import fs from "fs"
 import { ACPClient, type OpenCodeCommand } from "./acp-client"
 import { 
   getSessionDir, 
@@ -376,8 +377,20 @@ export abstract class BaseConnector<TSession extends BaseSession> {
       } catch (err) {
         this.logError(`Failed to disconnect session ${id}:`, err)
       }
+      this.deleteSessionCacheDir(id)
     }
     this.sessionManager.clear()
+  }
+
+  protected deleteSessionCacheDir(id: string): void {
+    const sessionDir = getSessionDir(this.config.connector, id)
+    try {
+      if (fs.existsSync(sessionDir)) {
+        fs.rmSync(sessionDir, { recursive: true, force: true })
+      }
+    } catch (err) {
+      this.logError(`Failed to delete session cache for ${id}:`, err)
+    }
   }
   
   // ---------------------------------------------------------------------------
@@ -471,6 +484,7 @@ export abstract class BaseConnector<TSession extends BaseSession> {
         await session.client.disconnect()
       } catch {}
       this.sessionManager.delete(id)
+      this.deleteSessionCacheDir(id)
       await sendFn(CommandHandler.formatSessionClearedMessage())
     } else {
       await sendFn(CommandHandler.formatNoSessionMessage())

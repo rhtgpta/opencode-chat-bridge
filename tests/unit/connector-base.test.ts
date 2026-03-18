@@ -3,14 +3,19 @@
  * Tests RateLimiter, SessionManager, and CommandHandler
  */
 
-import { describe, test, expect, beforeEach } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach } from "bun:test"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import {
   RateLimiter,
   SessionManager,
   CommandHandler,
+  BaseConnector,
   type BaseSession,
   type SessionStats,
 } from "../../src/connector-base"
+import { ensureSessionDir, getSessionDir } from "../../src/session-utils"
 
 // =============================================================================
 // RateLimiter
@@ -309,5 +314,92 @@ describe("CommandHandler", () => {
       expect(result.toLowerCase()).toContain("sorry")
       expect(result.toLowerCase()).toContain("wrong")
     })
+  })
+})
+
+describe("BaseConnector session cache cleanup", () => {
+  interface MockSession extends BaseSession {}
+
+  class TestConnector extends BaseConnector<MockSession> {
+    constructor() {
+      super({
+        connector: "slack",
+        trigger: "!oc",
+        botName: "TestBot",
+        rateLimitSeconds: 5,
+        sessionRetentionDays: 7,
+      })
+    }
+
+    async start(): Promise<void> {}
+    async stop(): Promise<void> {}
+    async sendMessage(_id: string, _text: string): Promise<void> {}
+
+    setSession(id: string, session: MockSession): void {
+      this.sessionManager.set(id, session)
+    }
+
+    async runCommand(id: string, command: string): Promise<string[]> {
+      const sent: string[] = []
+      await this.handleCommand(id, command, async (text) => {
+        sent.push(text)
+      })
+      return sent
+    }
+
+    async runDisconnectAll(): Promise<void> {
+      await this.disconnectAllSessions()
+    }
+  }
+
+  let connector: TestConnector
+  let sessionBaseDir: string
+
+  const createMockSession = (): MockSession => ({
+    client: { disconnect: async () => {} } as any,
+    createdAt: new Date(),
+    messageCount: 0,
+    lastActivity: new Date(),
+    inputChars: 0,
+    outputChars: 0,
+  })
+
+  beforeEach(() => {
+    sessionBaseDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-sessions-"))
+    process.env.SESSION_BASE_DIR = sessionBaseDir
+    connector = new TestConnector()
+  })
+
+  afterEach(() => {
+    delete process.env.SESSION_BASE_DIR
+    fs.rmSync(sessionBaseDir, { recursive: true, force: true })
+  })
+
+  test("/clear removes session cache directory", async () => {
+    const id = "C123:1711111111.001"
+    const sessionDir = getSessionDir("slack", id)
+    ensureSessionDir(sessionDir)
+    connector.setSession(id, createMockSession())
+
+    const sent = await connector.runCommand(id, "/clear")
+
+    expect(sent[0]).toContain("Session cleared")
+    expect(fs.existsSync(sessionDir)).toBe(false)
+  })
+
+  test("disconnectAllSessions removes all session cache directories", async () => {
+    const ids = ["C123:1711111111.001", "C123:1711111111.002"]
+    const dirs = ids.map((id) => getSessionDir("slack", id))
+
+    for (const [i, id] of ids.entries()) {
+      ensureSessionDir(dirs[i])
+      connector.setSession(id, createMockSession())
+    }
+
+    await connector.runDisconnectAll()
+
+    for (const dir of dirs) {
+      expect(fs.existsSync(dir)).toBe(false)
+    }
   })
 })

@@ -31,7 +31,6 @@ import {
   removeImageMarkers,
   sanitizeServerPaths,
 } from "../src"
-import { getSessionDir } from "../src/session-utils"
 
 // =============================================================================
 // Configuration
@@ -399,15 +398,6 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
       this.sessionManager.delete(id)
       this.deleteSessionCacheDir(id)
       this.log(`[SESSION_EXPIRE] ${id} removed after ${SESSION_RETENTION_MINS}m inactivity`)
-    }
-  }
-
-  private deleteSessionCacheDir(id: string): void {
-    const dir = getSessionDir(this.config.connector, id)
-    try {
-      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true })
-    } catch (err) {
-      this.logError(`[SESSION_EXPIRE] Failed cache cleanup for ${id}:`, err)
     }
   }
 
