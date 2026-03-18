@@ -275,7 +275,7 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 
 **How it differs from upstream:** upstream creates one opencode session per Slack channel; this fork creates a separate isolated session per Slack thread. `/clear` only clears the current thread's context, not the whole channel.
 
-**Thread context ID:** `context_id = ${team_id}:${channel_id}:${thread_ts_or_ts}` where `thread_ts_or_ts = event.thread_ts ?? event.ts`.
+**Thread context ID:** `context_id = ${channel_id}:${thread_ts_or_ts}` where `thread_ts_or_ts = event.thread_ts ?? event.ts`.
 
 **Thread reply behavior:** all Slack replies are posted with `thread_ts`.
 - top-level `app_mention` (no `thread_ts`) -> bot replies in new thread with `thread_ts=event.ts`
@@ -287,11 +287,10 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
   - expires thread sessions after this many minutes of user inactivity
 
 **Key changes in this fork:**
-- Thread-scoped session keying now uses `team:channel:thread_root_ts`
+- Thread-scoped session keying now uses `channel:thread_root_ts`
 - Event normalization captures `team_id`, `channel`, `ts`, `thread_ts`, `user`, `text` into one internal context
 - Replies are forced through `chat.postMessage` with mandatory `thread_ts`
 - Duplicate event handling uses `${channel}:${ts}` idempotency keys
-- In-thread follow-ups no longer require repeated `@bot` mentions or trigger prefix
 - Expired sessions auto-close on timer and delete in-memory + on-disk cache
 
 **Tests added:**
@@ -304,7 +303,7 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
    - Send `@bot hello` in a channel (not in thread)
    - Verify bot reply appears inside a new thread under that message
 2. Existing thread mention stays in same thread
-   - Reply in that thread with `@bot continue`
+   - Continue with replies/comments in that thread
    - Verify bot response stays in same thread (same thread root)
 3. Thread isolation in same channel
    - Create two separate threads in same channel
@@ -316,10 +315,7 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 5. Restart verification
    - Restart connector
    - Verify each thread context still maps independently
-6. Implicit in-thread follow-up
-   - In an existing thread, send a plain message without `@bot` or trigger
-   - Verify bot still responds in the same thread
-7. Retention timeout behavior
+6. Retention timeout behavior
    - Set `SESSION_RETENTION_MINS=1` temporarily, restart service
    - Start a thread and wait >1 minute without activity
    - Verify cache for that thread is removed and logs include session expiry marker
