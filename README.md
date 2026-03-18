@@ -285,6 +285,7 @@ This fork adds **per-Slack-thread session isolation** to `connectors/slack.ts`.
 **Config flags (Slack):**
 - `SESSION_RETENTION_MINS` (default: `30`)
   - expires thread sessions after this many minutes of user inactivity
+- Stale session cache directories are cleaned up on service restart.
 
 **Key changes in this fork:**
 - Thread-scoped session keying now uses `channel:thread_root_ts`
