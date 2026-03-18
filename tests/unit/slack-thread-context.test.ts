@@ -96,4 +96,43 @@ describe("slack thread context keying", () => {
     })).toBe(false)
   })
 
+  test("bot/edit/delete subtypes are excluded from implicit thread handler", () => {
+    expect(shouldHandleThreadMessage({
+      text: "hello",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+      subtype: "bot_message",
+    })).toBe(false)
+
+    expect(shouldHandleThreadMessage({
+      text: "hello",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+      subtype: "message_changed",
+    })).toBe(false)
+
+    expect(shouldHandleThreadMessage({
+      text: "hello",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+      subtype: "message_deleted",
+    })).toBe(false)
+  })
+
+  test("thread_broadcast and unknown subtype are accepted for user activity", () => {
+    expect(shouldHandleThreadMessage({
+      text: "hello",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+      subtype: "thread_broadcast",
+    })).toBe(true)
+
+    expect(shouldHandleThreadMessage({
+      text: "hello",
+      threadTs: "1710000000.123",
+      trigger: "!sql",
+      subtype: "some_other_subtype",
+    })).toBe(true)
+  })
+
 })

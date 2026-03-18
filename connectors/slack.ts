@@ -74,10 +74,12 @@ export function shouldHandleThreadMessage(input: {
   subtype?: string
   botId?: string
 }): boolean {
+  const blockedSubtypes = new Set(["bot_message", "message_changed", "message_deleted"])
+
   const text = input.text.trim()
   if (!text) return false
   if (!input.threadTs) return false
-  if (input.subtype && input.subtype !== "thread_broadcast") return false
+  if (input.subtype && blockedSubtypes.has(input.subtype)) return false
   if (input.botId) return false
   if (text.toLowerCase().startsWith(`${input.trigger.toLowerCase()} `)) return false
   if (/^<@[A-Z0-9]+>/.test(text)) return false
@@ -215,8 +217,6 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
 
     // Handle app mentions (@bot)
     this.app.event("app_mention", async ({ event, body, client }) => {
-      await this.expireStaleSessions()
-
       let context: SlackEventContext
       try {
         context = normalizeSlackEventContext({
@@ -237,13 +237,13 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
         return
       }
 
+      this.touchSessionActivity(context.contextId)
+
       this.log(`[MENTION] ${context.userId} in ${context.contextId}: ${context.text}`)
 
       // Extract query (remove the mention)
       const query = context.text.replace(/<@[A-Z0-9]+>/g, "").trim()
       if (!query) return
-
-      this.touchSessionActivity(context.contextId)
 
       // Rate limiting
       if (!this.checkRateLimit(context.userId)) return
@@ -253,8 +253,6 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
 
     // Handle messages with trigger prefix
     this.app.message(new RegExp(`^${TRIGGER}\\s+(.+)`, "i"), async ({ message, body, client }) => {
-      await this.expireStaleSessions()
-
       // Type guard for message with text and user
       if (!("text" in message) || !message.text) return
       if (!("user" in message) || !message.user) return
@@ -281,13 +279,14 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
         return
       }
 
+      this.touchSessionActivity(context.contextId)
+
       this.log(`[MSG] ${context.userId} in ${context.contextId}: ${context.text}`)
 
       // Extract query after trigger
       const match = context.text.match(new RegExp(`^${TRIGGER}\\s+(.+)`, "i"))
       if (!match) return
       const query = match[1].trim()
-      this.touchSessionActivity(context.contextId)
 
       // Handle commands
       if (query.startsWith("/")) {
@@ -304,8 +303,6 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     })
 
     this.app.message(async ({ message, body, client }) => {
-      await this.expireStaleSessions()
-
       if (!("text" in message) || !message.text) return
       if (!("user" in message) || !message.user) return
       if (!("channel" in message) || !message.channel) return
@@ -401,6 +398,12 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     return (Date.now() - session.lastActivity.getTime()) / 60000
   }
 
+  private touchSessionActivity(id: string): void {
+    const session = this.sessionManager.get(id)
+    if (!session) return
+    session.lastActivity = new Date()
+  }
+
   private sessionContextIdToDir(id: string): string {
     return getSessionDir(this.config.connector, id)
   }
@@ -425,12 +428,6 @@ export class SlackConnector extends BaseConnector<ChannelSession> {
     }
     this.sessionManager.delete(id)
     this.deleteSessionCacheDir(id)
-  }
-
-  private touchSessionActivity(id: string): void {
-    const session = this.sessionManager.get(id)
-    if (!session) return
-    session.lastActivity = new Date()
   }
 
   private startSessionExpiryLoop(): void {
