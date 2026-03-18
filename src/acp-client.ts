@@ -115,6 +115,7 @@ export class ACPClient extends EventEmitter {
     this.acp = spawn(opencodePath, ["acp"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.cwd,
+      env: process.env,
     })
     
     this.acp.stdout!.on("data", (data) => this.handleData(data))
